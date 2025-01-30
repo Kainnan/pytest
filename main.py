@@ -10,8 +10,8 @@ import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 import random
-import psutil
 import gc
+import resource
 
 # Configurar logging
 logging.basicConfig(
@@ -26,33 +26,25 @@ MAX_RETRIES = 3
 RETRY_DELAY = 2
 
 def get_memory_usage():
-    process = psutil.Process(os.getpid())
-    memory_info = process.memory_info()
-    memory_percent = process.memory_percent()
-    system_memory = psutil.virtual_memory()
-    
+    rusage = resource.getrusage(resource.RUSAGE_SELF)
     return {
-        'process_rss': memory_info.rss / 1024 / 1024,  # MB
-        'process_vms': memory_info.vms / 1024 / 1024,  # MB
-        'process_percent': memory_percent,
-        'system_total': system_memory.total / 1024 / 1024 / 1024,  # GB
-        'system_used_percent': system_memory.percent
+        'memory_mb': rusage.ru_maxrss / 1024,  # Convert KB to MB
+        'user_cpu_time': rusage.ru_utime,
+        'system_cpu_time': rusage.ru_stime
     }
 
 def log_memory_status(user_id, stage):
     mem = get_memory_usage()
     logger.info(
         f"MEMORY [Usuário {user_id}] [{stage}] - "
-        f"Processo: {mem['process_rss']:.1f}MB (RSS) / "
-        f"{mem['process_vms']:.1f}MB (VMS) / "
-        f"{mem['process_percent']:.1f}% | "
-        f"Sistema: {mem['system_total']:.1f}GB total / "
-        f"{mem['system_used_percent']:.1f}% usado"
+        f"Uso de Memória: {mem['memory_mb']:.1f}MB | "
+        f"CPU User: {mem['user_cpu_time']:.1f}s | "
+        f"CPU System: {mem['system_cpu_time']:.1f}s"
     )
 
 def check_system_resources():
-    memory = psutil.virtual_memory()
-    memory_status = memory.percent > 80
+    mem = get_memory_usage()
+    memory_status = mem['memory_mb'] > 1024 * 2  # Limite de 2GB
     log_memory_status('SYSTEM', 'Resource Check')
     return not memory_status
 
@@ -122,6 +114,21 @@ def create_driver(user_id):
             gc.collect()
     
     return None
+
+def click_button_safely(driver, button, user_id, button_num):
+    try:
+        driver.execute_script("arguments[0].scrollIntoView(true);", button)
+        time.sleep(0.5)
+        driver.execute_script("arguments[0].click();", button)
+        logger.info(f"Usuário {user_id}: Clicou no botão {button_num}")
+        return True
+    except Exception as e:
+        error_msg = str(e).strip()
+        if error_msg:
+            logger.warning(f"Usuário {user_id}: Erro ao clicar no botão {button_num} - {error_msg}")
+        else:
+            logger.warning(f"Usuário {user_id}: Timeout ao clicar no botão {button_num}")
+        return False
 
 def simulate_user_access(user_id):
     driver = None
