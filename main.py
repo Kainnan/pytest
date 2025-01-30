@@ -7,6 +7,8 @@ from selenium.webdriver.firefox.options import Options as FirefoxOptions
 import time
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
+import random
 
 # Configurar logging
 logging.basicConfig(
@@ -16,6 +18,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 GECKODRIVER_PATH = '/opt/geckodriver/geckodriver'
+CONNECTION_TIME = 60  # Tempo em segundos que cada usuário ficará conectado
 
 def create_driver():
     options = FirefoxOptions()
@@ -44,29 +47,43 @@ def simulate_user_access(user_id):
         driver.get(url)
         logger.info(f"Usuário {user_id}: Página carregada com sucesso")
         
+        # Espera inicial para a página carregar completamente
         time.sleep(5)
         
-        try:
-            dialog_backdrop = driver.find_element(By.CSS_SELECTOR, "div.q-dialog__backdrop")
-            if dialog_backdrop.is_displayed():
-                dialog_backdrop.click()
-                time.sleep(1)
-        except:
-            pass
+        # Loop principal de interação
+        start_time = time.time()
+        while time.time() - start_time < CONNECTION_TIME:
+            try:
+                # Tentar fechar diálogo se presente
+                try:
+                    dialog_backdrop = driver.find_element(By.CSS_SELECTOR, "div.q-dialog__backdrop")
+                    if dialog_backdrop.is_displayed():
+                        dialog_backdrop.click()
+                        time.sleep(1)
+                except:
+                    pass
+                
+                # Interagir com botões
+                buttons = WebDriverWait(driver, 10).until(
+                    EC.presence_of_all_elements_located((By.CSS_SELECTOR, "button.btn--bet"))
+                )
+                
+                for i in range(min(2, len(buttons))):
+                    button = buttons[i]
+                    driver.execute_script("arguments[0].scrollIntoView(true);", button)
+                    time.sleep(0.5)
+                    driver.execute_script("arguments[0].click();", button)
+                    logger.info(f"Usuário {user_id}: Clicou no botão {i+1}")
+                    time.sleep(1)
+                
+                # Espera aleatória entre 5 e 10 segundos antes da próxima interação
+                time.sleep(random.uniform(5, 10))
+                
+            except Exception as e:
+                logger.warning(f"Usuário {user_id}: Erro durante interação - {str(e)}")
+                time.sleep(2)
+                continue
         
-        buttons = WebDriverWait(driver, 10).until(
-            EC.presence_of_all_elements_located((By.CSS_SELECTOR, "button.btn--bet"))
-        )
-        
-        for i in range(min(2, len(buttons))):
-            button = buttons[i]
-            driver.execute_script("arguments[0].scrollIntoView(true);", button)
-            time.sleep(0.5)
-            driver.execute_script("arguments[0].click();", button)
-            logger.info(f"Usuário {user_id}: Clicou no botão {i+1}")
-            time.sleep(1)
-        
-        time.sleep(5)
         logger.info(f"Usuário {user_id}: Simulação concluída com sucesso")
         
     except Exception as e:
@@ -74,17 +91,28 @@ def simulate_user_access(user_id):
     
     finally:
         if driver:
-            driver.quit()
-            logger.info(f"Usuário {user_id}: Driver fechado com sucesso")
+            try:
+                driver.quit()
+                logger.info(f"Usuário {user_id}: Driver fechado com sucesso")
+            except:
+                pass
 
 def main():
-    num_users = 2  # Começar com apenas 2 usuários para teste
+    num_users = 10  # Número total de usuários
+    max_workers = 5  # Número de usuários simultâneos
     
-    logger.info(f"Iniciando simulação com {num_users} usuários")
+    logger.info(f"Iniciando simulação com {num_users} usuários ({max_workers} simultâneos)")
     
-    # Executar usuários sequencialmente
-    for user_id in range(1, num_users + 1):
-        simulate_user_access(user_id)
+    # Executar usuários em paralelo
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Criar lista de IDs de usuário
+        user_ids = list(range(1, num_users + 1))
+        
+        # Embaralhar os IDs para distribuição mais uniforme
+        random.shuffle(user_ids)
+        
+        # Executar as simulações
+        executor.map(simulate_user_access, user_ids)
     
     logger.info("Simulação concluída")
 
