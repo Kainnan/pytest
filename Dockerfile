@@ -1,7 +1,7 @@
 # Use a imagem base mais leve com Python 3.12
 FROM python:3.12-slim-bookworm
 
-# Versões compatíveis e testadas
+# Versões compativeis com Debian Bookworm
 ENV GECKODRIVER_VERSION=v0.34.0
 ENV FIREFOX_VERSION=115.12.0esr
 ENV DEBIAN_FRONTEND=noninteractive
@@ -14,7 +14,7 @@ ENV XDG_CACHE_HOME=/tmp/.cache
 ENV GEOMETRY=1024x768x24
 ENV FIREFOX_BIN=/opt/firefox/firefox
 
-# Instalar dependências essenciais como root
+# Instalar dependências essenciais
 RUN apt-get update -qqy && \
     apt-get install -qqy --no-install-recommends \
     ca-certificates \
@@ -35,8 +35,7 @@ RUN apt-get update -qqy && \
 # Instalar Firefox ESR específico
 RUN wget -qO /tmp/firefox.tar.bz2 \
     "https://download-installer.cdn.mozilla.net/pub/firefox/releases/${FIREFOX_VERSION}/linux-x86_64/en-US/firefox-${FIREFOX_VERSION}.tar.bz2" && \
-    mkdir -p /opt/firefox && \
-    tar -xjf /tmp/firefox.tar.bz2 -C /opt/firefox --strip-components=1 && \
+    tar -xjf /tmp/firefox.tar.bz2 -C /opt && \
     ln -s /opt/firefox/firefox /usr/local/bin/firefox && \
     rm /tmp/firefox.tar.bz2
 
@@ -47,18 +46,10 @@ RUN wget -qO /tmp/geckodriver.tar.gz \
     chmod +x /usr/local/bin/geckodriver && \
     rm /tmp/geckodriver.tar.gz
 
-# Configurar entrypoint como root
-RUN echo '#!/bin/sh\n\
-Xvfb :99 -ac -screen 0 "${GEOMETRY}" -nolisten tcp &\n\
-fluxbox &\n\
-exec "$@"' > /entrypoint.sh && \
-    chmod a+rx /entrypoint.sh
-
 # Configurar ambiente seguro
 RUN useradd --create-home --shell /bin/bash appuser && \
     mkdir -p /home/appuser/.cache/selenium && \
-    chown -R appuser:appuser /home/appuser && \
-    chmod -R 775 /home/appuser && \
+    chmod -R 777 /home/appuser/.cache && \
     chmod -R 777 /tmp
 
 WORKDIR /app
@@ -73,9 +64,14 @@ COPY . .
 RUN chown -R appuser:appuser /app && \
     chmod -R 755 /app
 
-# Mudar para usuário não-privilegiado
 USER appuser
 
-# Configurar entrypoint
+# Configurar Xvfb e fluxbox
+RUN echo '#!/bin/sh\n\
+Xvfb :99 -ac -screen 0 $GEOMETRY -nolisten tcp &\n\
+fluxbox &\n\
+exec "$@"' > /entrypoint.sh && \
+    chmod +x /entrypoint.sh
+
 ENTRYPOINT ["/usr/bin/dumb-init", "--", "/entrypoint.sh"]
 CMD ["python", "main.py"]
