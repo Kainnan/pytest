@@ -4,6 +4,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.firefox.service import Service
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
+from webdriver_manager.firefox import GeckoDriverManager
 from selenium.webdriver.common.action_chains import ActionChains
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -12,6 +13,13 @@ import logging
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+# Configurar opções do Firefox
+options = FirefoxOptions()
+options.add_argument('--headless')  # Rodar sem interface gráfica
+
+# Inicializar o WebDriver usando o WebDriverManager
+service = Service(GeckoDriverManager().install())
+driver = webdriver.Firefox(service=service, options=options)
 
 def simulate_user_access(user_id):
     try:
