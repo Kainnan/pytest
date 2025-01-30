@@ -24,10 +24,11 @@ logger = logging.getLogger(__name__)
 # Configurações
 GECKODRIVER_PATH = '/opt/geckodriver/geckodriver'
 CONNECTION_TIME = 60
-INITIAL_BATCH_SIZE = 3  # Começamos com 3 usuários garantidos
-MAX_CONCURRENT = 3      # Máximo de 3 simultâneos
-TOTAL_USERS = 50       # Total de usuários que queremos atingir
-BATCH_INTERVAL = 5     # 5 segundos entre tentativas de novo batch
+INITIAL_BATCH_SIZE = 10  # 10 usuários por batch
+MAX_CONCURRENT = 10      # 10 simultâneos
+TOTAL_USERS = 100       # Meta total
+BATCH_INTERVAL = 10     # Aumentado para 10 segundos entre batches
+RETRY_INTERVAL = 2      # Intervalo entre retentativas
 
 class BrowserManager:
     def __init__(self):
@@ -63,18 +64,28 @@ def create_driver():
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument('--disable-gpu')
     options.add_argument('--window-size=800,600')
+    options.add_argument('--single-process')  # Importante para muitos usuários
+    options.add_argument('--disable-features=site-per-process')
     
     if os.path.exists('/usr/bin/firefox-esr'):
         options.binary_location = '/usr/bin/firefox-esr'
     
+    # Otimizações para muitos usuários
     prefs = {
         'javascript.enabled': True,
         'dom.webdriver.enabled': False,
         'browser.cache.disk.enable': False,
         'browser.cache.memory.enable': False,
         'browser.sessionstore.enabled': False,
+        'browser.startup.page': 0,
+        'browser.tabs.remote.autostart': False,
+        'browser.tabs.remote.autostart.2': False,
+        'browser.sessionstore.max_tabs_undo': 0,
+        'browser.sessionhistory.max_entries': 1,
         'network.http.connection-timeout': 30,
-        'dom.max_script_run_time': 20
+        'dom.max_script_run_time': 20,
+        'browser.cache.memory.capacity': 2048,
+        'browser.cache.memory.max_entry_size': 512
     }
     
     for key, value in prefs.items():
@@ -91,10 +102,18 @@ def simulate_user_access(user_id, browser_manager):
     driver = None
     try:
         logger.info(f"Usuário {user_id}: Iniciando simulação")
-        cleanup_firefox()  # Limpa processos antes de começar
+        cleanup_firefox()
         
-        driver = create_driver()
-        driver.set_page_load_timeout(30)
+        for attempt in range(3):  # 3 tentativas para criar driver
+            try:
+                driver = create_driver()
+                driver.set_page_load_timeout(30)
+                break
+            except Exception as e:
+                if attempt == 2:
+                    raise
+                logger.warning(f"Usuário {user_id}: Tentativa {attempt + 1} falhou - {str(e)}")
+                time.sleep(RETRY_INTERVAL)
         
         url = "https://gli-bcrash.eu-f2.bananaprovider.com/demo"
         driver.get(url)
@@ -120,15 +139,23 @@ def simulate_user_access(user_id, browser_manager):
                     EC.presence_of_all_elements_located((By.CSS_SELECTOR, "button.btn--bet"))
                 )
                 
+                success = False
                 for i in range(min(2, len(buttons))):
-                    driver.execute_script("arguments[0].scrollIntoView(true);", buttons[i])
-                    time.sleep(0.5)
-                    driver.execute_script("arguments[0].click();", buttons[i])
-                    logger.info(f"Usuário {user_id}: Clicou no botão {i+1}")
-                    interaction_count += 1
-                    time.sleep(1)
+                    try:
+                        driver.execute_script("arguments[0].scrollIntoView(true);", buttons[i])
+                        time.sleep(0.5)
+                        driver.execute_script("arguments[0].click();", buttons[i])
+                        logger.info(f"Usuário {user_id}: Clicou no botão {i+1}")
+                        interaction_count += 1
+                        time.sleep(1)
+                        success = True
+                    except Exception as click_error:
+                        logger.warning(f"Usuário {user_id}: Erro ao clicar no botão {i+1} - {str(click_error)}")
                 
-                time.sleep(random.uniform(5, 8))
+                if not success:
+                    time.sleep(2)
+                else:
+                    time.sleep(random.uniform(5, 8))
                 
             except Exception as e:
                 logger.warning(f"Usuário {user_id}: Erro durante interação - {str(e)}")
@@ -151,7 +178,7 @@ def simulate_user_access(user_id, browser_manager):
             except:
                 pass
         browser_manager.end_session()
-        cleanup_firefox()  # Limpa processos ao finalizar
+        cleanup_firefox()
 
 def process_user_batch(user_ids, browser_manager):
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT) as executor:
@@ -159,6 +186,7 @@ def process_user_batch(user_ids, browser_manager):
         for user_id in user_ids:
             future = executor.submit(simulate_user_access, user_id, browser_manager)
             futures.append(future)
+            time.sleep(0.5)  # Pequeno intervalo entre inicializações no mesmo batch
         
         # Aguardar conclusão
         for future in futures:
