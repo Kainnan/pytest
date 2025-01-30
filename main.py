@@ -4,7 +4,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.firefox.service import Service
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
-from selenium.common.exceptions import WebDriverException
+from selenium.common.exceptions import WebDriverException, TimeoutException
 import time
 import logging
 import os
@@ -27,20 +27,50 @@ def create_driver(user_id):
     for attempt in range(MAX_RETRIES):
         try:
             options = FirefoxOptions()
+            
+            # Configurações básicas do headless
             options.add_argument('--headless')
             options.add_argument('--no-sandbox')
             options.add_argument('--disable-dev-shm-usage')
-            options.add_argument('--width=1920')
-            options.add_argument('--height=1080')
             options.add_argument('--disable-gpu')
+            
+            # Otimizações de memória e performance
+            options.add_argument('--disable-plugins')
+            options.add_argument('--disable-extensions')
+            options.add_argument('--disable-infobars')
+            options.add_argument('--disable-notifications')
+            options.add_argument('--disable-popup-blocking')
+            options.add_argument('--disable-save-password-bubble')
+            options.add_argument('--disable-single-click-autofill')
+            options.add_argument('--disable-translate')
+            options.add_argument('--disable-web-security')
+            options.add_argument('--ignore-certificate-errors')
             
             if os.path.exists('/usr/bin/firefox-esr'):
                 options.binary_location = '/usr/bin/firefox-esr'
             
+            # Preferências do Firefox para otimização
             options.set_preference('javascript.enabled', True)
             options.set_preference('dom.webdriver.enabled', False)
             options.set_preference('browser.cache.disk.enable', False)
             options.set_preference('browser.cache.memory.enable', False)
+            options.set_preference('network.http.connection-timeout', 30)
+            options.set_preference('dom.max_script_run_time', 20)
+            
+            # Desabilitar recursos visuais não necessários
+            options.set_preference('browser.tabs.remote.autostart', False)
+            options.set_preference('browser.tabs.remote.autostart.2', False)
+            options.set_preference('browser.sessionstore.interval', 60000)
+            options.set_preference('image.animation_mode', 'none')
+            options.set_preference('media.autoplay.default', 5)
+            options.set_preference('media.autoplay.enabled', False)
+            options.set_preference('media.hardware-video-decoding.enabled', False)
+            options.set_preference('media.webspeech.synth.enabled', False)
+            options.set_preference('webgl.disabled', True)
+            options.set_preference('dom.ipc.plugins.enabled', False)
+            
+            # Configurar tamanho mínimo da janela
+            options.add_argument('--window-size=800,600')
             
             service = Service(
                 executable_path=GECKODRIVER_PATH,
@@ -51,14 +81,17 @@ def create_driver(user_id):
             return driver
             
         except Exception as e:
-            logger.warning(f"Usuário {user_id}: Tentativa {attempt + 1} de criar driver falhou - {str(e)}")
+            error_msg = str(e).strip()
+            if error_msg:
+                logger.warning(f"Usuário {user_id}: Tentativa {attempt + 1} de criar driver falhou - {error_msg}")
+            else:
+                logger.warning(f"Usuário {user_id}: Tentativa {attempt + 1} de criar driver falhou - Timeout ou conexão perdida")
             time.sleep(RETRY_DELAY)
     
     return None
 
 def is_driver_alive(driver):
     try:
-        # Tenta executar um comando simples para verificar se o driver ainda está responsivo
         driver.current_url
         return True
     except:
@@ -71,11 +104,20 @@ def click_button_safely(driver, button, user_id, button_num):
             
         driver.execute_script("arguments[0].scrollIntoView(true);", button)
         time.sleep(0.5)
-        driver.execute_script("arguments[0].click();", button)
+        
+        try:
+            driver.execute_script("arguments[0].click();", button)
+        except:
+            button.click()
+            
         logger.info(f"Usuário {user_id}: Clicou no botão {button_num}")
         return True
     except Exception as e:
-        logger.warning(f"Usuário {user_id}: Erro ao clicar no botão {button_num} - {str(e)}")
+        error_msg = str(e).strip()
+        if error_msg:
+            logger.warning(f"Usuário {user_id}: Erro ao clicar no botão {button_num} - {error_msg}")
+        else:
+            logger.warning(f"Usuário {user_id}: Timeout ao clicar no botão {button_num}")
         return False
 
 def simulate_user_access(user_id):
@@ -88,10 +130,8 @@ def simulate_user_access(user_id):
             logger.error(f"Usuário {user_id}: Falha ao criar driver após {MAX_RETRIES} tentativas")
             return
         
-        # Configurar tempo limite de página
         driver.set_page_load_timeout(30)
         
-        # Carregar página inicial
         url = "https://gli-bcrash.eu-f2.bananaprovider.com/demo"
         for attempt in range(MAX_RETRIES):
             try:
@@ -99,20 +139,24 @@ def simulate_user_access(user_id):
                 logger.info(f"Usuário {user_id}: Página carregada com sucesso")
                 break
             except Exception as e:
+                error_msg = str(e).strip()
+                if error_msg:
+                    logger.warning(f"Usuário {user_id}: Tentativa {attempt + 1} falhou - {error_msg}")
+                else:
+                    logger.warning(f"Usuário {user_id}: Tentativa {attempt + 1} falhou - Timeout")
                 if attempt == MAX_RETRIES - 1:
                     raise
-                logger.warning(f"Usuário {user_id}: Tentativa {attempt + 1} de carregar página falhou")
                 time.sleep(RETRY_DELAY)
         
-        # Loop principal de interação
         start_time = time.time()
+        interaction_count = 0
+        
         while time.time() - start_time < CONNECTION_TIME:
             if not is_driver_alive(driver):
                 logger.error(f"Usuário {user_id}: Driver perdeu a conexão")
                 break
                 
             try:
-                # Tentar fechar diálogo
                 try:
                     dialog_backdrop = driver.find_element(By.CSS_SELECTOR, "div.q-dialog__backdrop")
                     if dialog_backdrop.is_displayed():
@@ -121,7 +165,6 @@ def simulate_user_access(user_id):
                 except:
                     pass
                 
-                # Interagir com botões
                 wait = WebDriverWait(driver, 10)
                 buttons = wait.until(
                     EC.presence_of_all_elements_located((By.CSS_SELECTOR, "button.btn--bet"))
@@ -133,21 +176,30 @@ def simulate_user_access(user_id):
                         success = True
                         time.sleep(1)
                 
-                if not success:
-                    logger.warning(f"Usuário {user_id}: Nenhum botão foi clicado com sucesso")
-                    continue
+                if success:
+                    interaction_count += 1
                 
-                # Espera entre interações
                 time.sleep(random.uniform(5, 8))
                 
+            except TimeoutException:
+                logger.warning(f"Usuário {user_id}: Timeout durante interação")
+                time.sleep(2)
             except Exception as e:
-                logger.warning(f"Usuário {user_id}: Erro durante interação - {str(e)}")
+                error_msg = str(e).strip()
+                if error_msg:
+                    logger.warning(f"Usuário {user_id}: Erro durante interação - {error_msg}")
+                else:
+                    logger.warning(f"Usuário {user_id}: Erro durante interação - Possível timeout")
                 time.sleep(2)
         
-        logger.info(f"Usuário {user_id}: Simulação concluída com sucesso")
+        logger.info(f"Usuário {user_id}: Simulação concluída com sucesso (Total de interações: {interaction_count})")
         
     except Exception as e:
-        logger.error(f"Usuário {user_id}: Erro durante a simulação - {str(e)}")
+        error_msg = str(e).strip()
+        if error_msg:
+            logger.error(f"Usuário {user_id}: Erro durante a simulação - {error_msg}")
+        else:
+            logger.error(f"Usuário {user_id}: Erro durante a simulação - Timeout ou conexão perdida")
     
     finally:
         if driver:
@@ -158,8 +210,8 @@ def simulate_user_access(user_id):
                 pass
 
 def main():
-    num_users = 8  # Reduzido de 10 para 8
-    max_workers = 4  # Reduzido de 5 para 4
+    num_users = 15  # Aumentado para 15 usuários
+    max_workers = 8  # Aumentado para 8 simultâneos
     
     logger.info(f"Iniciando simulação com {num_users} usuários ({max_workers} simultâneos)")
     
