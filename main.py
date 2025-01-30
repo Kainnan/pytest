@@ -9,7 +9,6 @@ from concurrent.futures import ThreadPoolExecutor
 import logging
 import os
 import subprocess
-from threading import Lock
 
 # Configurar logging
 logging.basicConfig(
@@ -19,60 +18,48 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 GECKODRIVER_PATH = '/opt/geckodriver/geckodriver'
-driver_lock = Lock()
 MAX_RETRIES = 3
 RETRY_DELAY = 2
 
-def cleanup_firefox():
-    try:
-        subprocess.run(['pkill', 'firefox'], stderr=subprocess.DEVNULL)
-        subprocess.run(['pkill', 'geckodriver'], stderr=subprocess.DEVNULL)
-        time.sleep(1)
-    except Exception as e:
-        logger.warning(f"Erro ao limpar processos: {str(e)}")
-
 def create_driver(user_id):
-    with driver_lock:
-        try:
-            cleanup_firefox()
-            
-            options = FirefoxOptions()
-            options.add_argument('--headless')
-            options.add_argument('--no-sandbox')
-            options.add_argument('--disable-dev-shm-usage')
-            options.add_argument('--disable-gpu')
-            options.add_argument('--width=1920')
-            options.add_argument('--height=1080')
-            
-            # Configurações de memória
-            options.add_argument('--memory-pressure-off')
-            options.add_argument('--disable-features=PreloadMediaEngagementData,MediaEngagementBypassAutoplayPolicies')
-            
-            if os.path.exists('/usr/bin/firefox-esr'):
-                options.binary_location = '/usr/bin/firefox-esr'
-            
-            options.set_preference('javascript.enabled', True)
-            options.set_preference('dom.webdriver.enabled', False)
-            options.set_preference('useAutomationExtension', False)
-            options.set_preference('browser.cache.disk.enable', False)
-            options.set_preference('browser.cache.memory.enable', False)
-            options.set_preference('browser.cache.offline.enable', False)
-            options.set_preference('network.http.use-cache', False)
-            
-            service = Service(
-                executable_path=GECKODRIVER_PATH,
-                log_path='/dev/null'
-            )
-            
-            driver = webdriver.Firefox(
-                service=service,
-                options=options
-            )
-            
-            return driver
-        except Exception as e:
-            logger.error(f"Erro ao criar driver para usuário {user_id}: {str(e)}")
-            return None
+    try:
+        options = FirefoxOptions()
+        options.add_argument('--headless')
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-gpu')
+        options.add_argument('--width=1920')
+        options.add_argument('--height=1080')
+        
+        # Configurações de memória
+        options.add_argument('--memory-pressure-off')
+        options.add_argument('--disable-features=PreloadMediaEngagementData,MediaEngagementBypassAutoplayPolicies')
+        
+        if os.path.exists('/usr/bin/firefox-esr'):
+            options.binary_location = '/usr/bin/firefox-esr'
+        
+        options.set_preference('javascript.enabled', True)
+        options.set_preference('dom.webdriver.enabled', False)
+        options.set_preference('useAutomationExtension', False)
+        options.set_preference('browser.cache.disk.enable', False)
+        options.set_preference('browser.cache.memory.enable', False)
+        options.set_preference('browser.cache.offline.enable', False)
+        options.set_preference('network.http.use-cache', False)
+        
+        service = Service(
+            executable_path=GECKODRIVER_PATH,
+            log_path='/dev/null'
+        )
+        
+        driver = webdriver.Firefox(
+            service=service,
+            options=options
+        )
+        
+        return driver
+    except Exception as e:
+        logger.error(f"Erro ao criar driver para usuário {user_id}: {str(e)}")
+        return None
 
 def simulate_user_access(user_id):
     driver = None
@@ -153,12 +140,17 @@ def simulate_user_access(user_id):
                 logger.info(f"Usuário {user_id}: Driver fechado com sucesso")
             except:
                 pass
-            cleanup_firefox()
+            try:
+                # Limpar processos apenas do Firefox deste usuário
+                if driver.service.process:
+                    driver.service.process.kill()
+            except:
+                pass
 
 def main():
-    # Configuração inicial mais conservadora
-    num_users = 5  # Reduzido para 5 usuários
-    max_workers = 2  # Reduzido para 2 workers
+    # Configuração inicial
+    num_users = 5
+    max_workers = 2
     
     logger.info(f"Iniciando simulação com {num_users} usuários e {max_workers} workers")
     
