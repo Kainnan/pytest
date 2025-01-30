@@ -16,6 +16,8 @@ RUN apt-get update && apt-get install -y \
     libpci3 \
     xvfb \
     procps \
+    python3-dev \
+    gcc \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -23,21 +25,19 @@ WORKDIR /app
 # Baixar e instalar geckodriver
 RUN wget -q "https://github.com/mozilla/geckodriver/releases/download/${GECKODRIVER_VERSION}/geckodriver-${GECKODRIVER_VERSION}-linux64.tar.gz" \
     && tar -xzf "geckodriver-${GECKODRIVER_VERSION}-linux64.tar.gz" \
-    && rm "geckodriver-${GECKODRIVER_VERSION}-linux64.tar.gz" \
     && mkdir -p /opt/geckodriver \
     && mv geckodriver /opt/geckodriver/ \
     && chmod 755 /opt/geckodriver/geckodriver \
-    && ln -s /opt/geckodriver/geckodriver /usr/local/bin/geckodriver
-
-# Criar diretórios necessários
-RUN mkdir -p /root/.cache/selenium \
-    && chmod -R 777 /root/.cache/selenium \
-    && mkdir -p /dev/shm \
-    && chmod 1777 /dev/shm
+    && ln -s /opt/geckodriver/geckodriver /usr/local/bin/geckodriver \
+    && rm "geckodriver-${GECKODRIVER_VERSION}-linux64.tar.gz"
 
 # Copiar requirements e instalar dependências Python
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Criar diretório para cache
+RUN mkdir -p /root/.cache/selenium \
+    && chmod -R 777 /root/.cache/selenium
 
 # Copiar o código da aplicação
 COPY . .

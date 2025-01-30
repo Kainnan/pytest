@@ -10,6 +10,8 @@ import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 import random
+import psutil
+import gc
 
 # Configurar logging
 logging.basicConfig(
@@ -23,7 +25,44 @@ CONNECTION_TIME = 60
 MAX_RETRIES = 3
 RETRY_DELAY = 2
 
+def get_memory_usage():
+    process = psutil.Process(os.getpid())
+    memory_info = process.memory_info()
+    memory_percent = process.memory_percent()
+    system_memory = psutil.virtual_memory()
+    
+    return {
+        'process_rss': memory_info.rss / 1024 / 1024,  # MB
+        'process_vms': memory_info.vms / 1024 / 1024,  # MB
+        'process_percent': memory_percent,
+        'system_total': system_memory.total / 1024 / 1024 / 1024,  # GB
+        'system_used_percent': system_memory.percent
+    }
+
+def log_memory_status(user_id, stage):
+    mem = get_memory_usage()
+    logger.info(
+        f"MEMORY [Usuário {user_id}] [{stage}] - "
+        f"Processo: {mem['process_rss']:.1f}MB (RSS) / "
+        f"{mem['process_vms']:.1f}MB (VMS) / "
+        f"{mem['process_percent']:.1f}% | "
+        f"Sistema: {mem['system_total']:.1f}GB total / "
+        f"{mem['system_used_percent']:.1f}% usado"
+    )
+
+def check_system_resources():
+    memory = psutil.virtual_memory()
+    memory_status = memory.percent > 80
+    log_memory_status('SYSTEM', 'Resource Check')
+    return not memory_status
+
 def create_driver(user_id):
+    log_memory_status(user_id, 'Pre-Driver')
+    
+    if not check_system_resources():
+        logger.warning(f"Usuário {user_id}: Recursos do sistema muito altos, aguardando...")
+        time.sleep(5)
+        
     for attempt in range(MAX_RETRIES):
         try:
             options = FirefoxOptions()
@@ -34,42 +73,30 @@ def create_driver(user_id):
             options.add_argument('--disable-dev-shm-usage')
             options.add_argument('--disable-gpu')
             
-            # Otimizações de memória e performance
+            # Otimizações de memória
+            options.add_argument('--js-flags="--max-old-space-size=256"')
+            options.add_argument('--disable-features=PreloadMediaEngagementData,MediaEngagementBypassAutoplayPolicies')
             options.add_argument('--disable-plugins')
             options.add_argument('--disable-extensions')
             options.add_argument('--disable-infobars')
             options.add_argument('--disable-notifications')
             options.add_argument('--disable-popup-blocking')
-            options.add_argument('--disable-save-password-bubble')
-            options.add_argument('--disable-single-click-autofill')
-            options.add_argument('--disable-translate')
-            options.add_argument('--disable-web-security')
-            options.add_argument('--ignore-certificate-errors')
             
             if os.path.exists('/usr/bin/firefox-esr'):
                 options.binary_location = '/usr/bin/firefox-esr'
             
-            # Preferências do Firefox para otimização
+            # Preferências otimizadas
             options.set_preference('javascript.enabled', True)
             options.set_preference('dom.webdriver.enabled', False)
             options.set_preference('browser.cache.disk.enable', False)
             options.set_preference('browser.cache.memory.enable', False)
-            options.set_preference('network.http.connection-timeout', 30)
-            options.set_preference('dom.max_script_run_time', 20)
+            options.set_preference('browser.cache.offline.enable', False)
+            options.set_preference('network.http.use-cache', False)
+            options.set_preference('browser.sessionstore.enabled', False)
+            options.set_preference('browser.startup.page', 0)
+            options.set_preference('browser.download.manager.retention', 0)
+            options.set_preference('privacy.trackingprotection.enabled', False)
             
-            # Desabilitar recursos visuais não necessários
-            options.set_preference('browser.tabs.remote.autostart', False)
-            options.set_preference('browser.tabs.remote.autostart.2', False)
-            options.set_preference('browser.sessionstore.interval', 60000)
-            options.set_preference('image.animation_mode', 'none')
-            options.set_preference('media.autoplay.default', 5)
-            options.set_preference('media.autoplay.enabled', False)
-            options.set_preference('media.hardware-video-decoding.enabled', False)
-            options.set_preference('media.webspeech.synth.enabled', False)
-            options.set_preference('webgl.disabled', True)
-            options.set_preference('dom.ipc.plugins.enabled', False)
-            
-            # Configurar tamanho mínimo da janela
             options.add_argument('--window-size=800,600')
             
             service = Service(
@@ -78,6 +105,10 @@ def create_driver(user_id):
             )
             
             driver = webdriver.Firefox(service=service, options=options)
+            
+            log_memory_status(user_id, 'Post-Driver')
+            gc.collect()
+            
             return driver
             
         except Exception as e:
@@ -86,44 +117,18 @@ def create_driver(user_id):
                 logger.warning(f"Usuário {user_id}: Tentativa {attempt + 1} de criar driver falhou - {error_msg}")
             else:
                 logger.warning(f"Usuário {user_id}: Tentativa {attempt + 1} de criar driver falhou - Timeout ou conexão perdida")
-            time.sleep(RETRY_DELAY)
+            
+            time.sleep(RETRY_DELAY * (attempt + 1))
+            gc.collect()
     
     return None
-
-def is_driver_alive(driver):
-    try:
-        driver.current_url
-        return True
-    except:
-        return False
-
-def click_button_safely(driver, button, user_id, button_num):
-    try:
-        if not is_driver_alive(driver):
-            raise WebDriverException("Driver não está mais responsivo")
-            
-        driver.execute_script("arguments[0].scrollIntoView(true);", button)
-        time.sleep(0.5)
-        
-        try:
-            driver.execute_script("arguments[0].click();", button)
-        except:
-            button.click()
-            
-        logger.info(f"Usuário {user_id}: Clicou no botão {button_num}")
-        return True
-    except Exception as e:
-        error_msg = str(e).strip()
-        if error_msg:
-            logger.warning(f"Usuário {user_id}: Erro ao clicar no botão {button_num} - {error_msg}")
-        else:
-            logger.warning(f"Usuário {user_id}: Timeout ao clicar no botão {button_num}")
-        return False
 
 def simulate_user_access(user_id):
     driver = None
     try:
         logger.info(f"Usuário {user_id}: Iniciando simulação")
+        log_memory_status(user_id, 'Start')
+        
         driver = create_driver(user_id)
         
         if not driver:
@@ -131,12 +136,13 @@ def simulate_user_access(user_id):
             return
         
         driver.set_page_load_timeout(30)
-        
         url = "https://gli-bcrash.eu-f2.bananaprovider.com/demo"
+        
         for attempt in range(MAX_RETRIES):
             try:
                 driver.get(url)
                 logger.info(f"Usuário {user_id}: Página carregada com sucesso")
+                log_memory_status(user_id, 'Page Loaded')
                 break
             except Exception as e:
                 error_msg = str(e).strip()
@@ -152,8 +158,10 @@ def simulate_user_access(user_id):
         interaction_count = 0
         
         while time.time() - start_time < CONNECTION_TIME:
-            if not is_driver_alive(driver):
-                logger.error(f"Usuário {user_id}: Driver perdeu a conexão")
+            log_memory_status(user_id, f'Interaction {interaction_count}')
+            
+            if not check_system_resources():
+                logger.warning(f"Usuário {user_id}: Alto uso de memória detectado")
                 break
                 
             try:
@@ -193,6 +201,7 @@ def simulate_user_access(user_id):
                 time.sleep(2)
         
         logger.info(f"Usuário {user_id}: Simulação concluída com sucesso (Total de interações: {interaction_count})")
+        log_memory_status(user_id, 'End')
         
     except Exception as e:
         error_msg = str(e).strip()
@@ -206,20 +215,32 @@ def simulate_user_access(user_id):
             try:
                 driver.quit()
                 logger.info(f"Usuário {user_id}: Driver fechado com sucesso")
+                log_memory_status(user_id, 'After Driver Quit')
             except:
                 pass
+            gc.collect()
 
 def main():
-    num_users = 15  # Aumentado para 15 usuários
-    max_workers = 8  # Aumentado para 8 simultâneos
+    num_users = 10
+    max_workers = 5
     
     logger.info(f"Iniciando simulação com {num_users} usuários ({max_workers} simultâneos)")
+    log_memory_status('MAIN', 'Start')
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         user_ids = list(range(1, num_users + 1))
         random.shuffle(user_ids)
-        executor.map(simulate_user_access, user_ids)
+        
+        results = []
+        for user_id in user_ids:
+            results.append(executor.submit(simulate_user_access, user_id))
+            time.sleep(2)
+            log_memory_status('MAIN', f'User {user_id} Started')
+        
+        for future in results:
+            future.result()
     
+    log_memory_status('MAIN', 'End')
     logger.info("Simulação concluída")
 
 if __name__ == "__main__":
