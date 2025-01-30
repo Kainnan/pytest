@@ -8,15 +8,11 @@ from selenium.common.exceptions import WebDriverException, TimeoutException
 import time
 import logging
 import os
-from concurrent.futures import ThreadPoolExecutor
 import random
-import gc
-import resource
-import subprocess
 import threading
-from functools import wraps
-from queue import Queue, Empty
-import atexit
+import subprocess
+import queue
+from concurrent.futures import ThreadPoolExecutor
 
 # Configurar logging
 logging.basicConfig(
@@ -25,271 +21,169 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Configurações
 GECKODRIVER_PATH = '/opt/geckodriver/geckodriver'
 CONNECTION_TIME = 60
-MAX_RETRIES = 3
-RETRY_DELAY = 2
+INITIAL_BATCH_SIZE = 3  # Começamos com 3 usuários garantidos
+MAX_CONCURRENT = 3      # Máximo de 3 simultâneos
+TOTAL_USERS = 50       # Total de usuários que queremos atingir
+BATCH_INTERVAL = 5     # 5 segundos entre tentativas de novo batch
 
-def get_memory_usage():
-    rusage = resource.getrusage(resource.RUSAGE_SELF)
-    return {
-        'memory_mb': rusage.ru_maxrss / 1024,
-        'user_cpu_time': rusage.ru_utime,
-        'system_cpu_time': rusage.ru_stime
-    }
-
-def log_memory_status(user_id, stage):
-    mem = get_memory_usage()
-    logger.info(
-        f"MEMORY [Usuário {user_id}] [{stage}] - "
-        f"Uso de Memória: {mem['memory_mb']:.1f}MB | "
-        f"CPU User: {mem['user_cpu_time']:.1f}s | "
-        f"CPU System: {mem['system_cpu_time']:.1f}s"
-    )
-
-def with_retry(max_attempts=3):
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            for attempt in range(max_attempts):
-                try:
-                    return func(*args, **kwargs)
-                except Exception as e:
-                    if attempt == max_attempts - 1:
-                        raise
-                    time.sleep(RETRY_DELAY * (attempt + 1))
-            return None
-        return wrapper
-    return decorator
-
-class DriverPool:
-    def __init__(self, pool_size):
-        self.pool_size = pool_size
-        self.available_drivers = Queue()
-        self.active_drivers = set()
+class BrowserManager:
+    def __init__(self):
+        self.active_sessions = 0
         self.lock = threading.Lock()
-        self.initialized = False
+        self.session_queue = queue.Queue()
+        
+    def can_start_session(self):
+        with self.lock:
+            if self.active_sessions < MAX_CONCURRENT:
+                self.active_sessions += 1
+                return True
+            return False
     
-    def _create_driver_options(self):
-        options = FirefoxOptions()
-        
-        # Configurações básicas
-        options.add_argument('--headless')
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-dev-shm-usage')
-        options.add_argument('--disable-gpu')
-        options.add_argument('--single-process')
-        options.add_argument('--disable-features=site-per-process')
-        options.add_argument('--window-size=800,600')
-        
-        # Otimizações de memória
-        options.add_argument('--js-flags="--max-old-space-size=256"')
-        options.add_argument('--disable-features=PreloadMediaEngagementData,MediaEngagementBypassAutoplayPolicies')
-        
-        if os.path.exists('/usr/bin/firefox-esr'):
-            options.binary_location = '/usr/bin/firefox-esr'
-        
-        # Preferências críticas para escala
-        prefs = {
-            'javascript.enabled': True,
-            'dom.webdriver.enabled': False,
-            'browser.cache.disk.enable': False,
-            'browser.cache.memory.enable': False,
-            'browser.cache.offline.enable': False,
-            'network.http.use-cache': False,
-            'browser.sessionstore.enabled': False,
-            'browser.sessionstore.max_tabs_undo': 0,
-            'browser.sessionstore.max_windows_undo': 0,
-            'browser.sessionhistory.max_entries': 1,
-            'browser.sessionhistory.max_total_viewers': 0,
-            'browser.cache.memory.capacity': 2048,
-            'browser.cache.memory.max_entry_size': 512,
-            'marionette.timeout': 60000,
-            'dom.max_script_run_time': 30
-        }
-        
-        for key, value in prefs.items():
-            options.set_preference(key, value)
-        
-        return options
+    def end_session(self):
+        with self.lock:
+            self.active_sessions -= 1
+            if self.active_sessions < 0:
+                self.active_sessions = 0
+
+def cleanup_firefox():
+    try:
+        subprocess.run(['pkill', '-f', 'firefox'], stderr=subprocess.DEVNULL)
+        subprocess.run(['pkill', '-f', 'geckodriver'], stderr=subprocess.DEVNULL)
+        time.sleep(1)
+    except:
+        pass
+
+def create_driver():
+    options = FirefoxOptions()
+    options.add_argument('--headless')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    options.add_argument('--disable-gpu')
+    options.add_argument('--window-size=800,600')
     
-    @with_retry(max_attempts=3)
-    def _create_new_driver(self):
-        options = self._create_driver_options()
-        service = Service(
-            executable_path=GECKODRIVER_PATH,
-            log_path='/dev/null'
-        )
-        driver = webdriver.Firefox(service=service, options=options)
-        return driver
+    if os.path.exists('/usr/bin/firefox-esr'):
+        options.binary_location = '/usr/bin/firefox-esr'
     
-    def initialize_pool(self):
-        if self.initialized:
-            return
-            
-        logger.info(f"Inicializando pool com {self.pool_size} drivers")
-        for _ in range(self.pool_size):
+    prefs = {
+        'javascript.enabled': True,
+        'dom.webdriver.enabled': False,
+        'browser.cache.disk.enable': False,
+        'browser.cache.memory.enable': False,
+        'browser.sessionstore.enabled': False,
+        'network.http.connection-timeout': 30,
+        'dom.max_script_run_time': 20
+    }
+    
+    for key, value in prefs.items():
+        options.set_preference(key, value)
+    
+    service = Service(GECKODRIVER_PATH)
+    return webdriver.Firefox(service=service, options=options)
+
+def simulate_user_access(user_id, browser_manager):
+    if not browser_manager.can_start_session():
+        logger.info(f"Usuário {user_id}: Aguardando slot disponível")
+        return False
+    
+    driver = None
+    try:
+        logger.info(f"Usuário {user_id}: Iniciando simulação")
+        cleanup_firefox()  # Limpa processos antes de começar
+        
+        driver = create_driver()
+        driver.set_page_load_timeout(30)
+        
+        url = "https://gli-bcrash.eu-f2.bananaprovider.com/demo"
+        driver.get(url)
+        logger.info(f"Usuário {user_id}: Página carregada com sucesso")
+        
+        start_time = time.time()
+        interaction_count = 0
+        
+        while time.time() - start_time < CONNECTION_TIME:
             try:
-                driver = self._create_new_driver()
-                if driver:
-                    self.available_drivers.put(driver)
-                time.sleep(2)
-            except Exception as e:
-                logger.error(f"Erro ao criar driver para pool: {str(e)}")
-        
-        self.initialized = True
-        logger.info(f"Pool inicializado com {self.available_drivers.qsize()} drivers")
-    
-    def get_driver(self, timeout=30):
-        try:
-            driver = self.available_drivers.get(timeout=timeout)
-            with self.lock:
-                self.active_drivers.add(driver)
-            return driver
-        except Empty:
-            driver = self._create_new_driver()
-            if driver:
-                with self.lock:
-                    self.active_drivers.add(driver)
-            return driver
-    
-    def return_driver(self, driver):
-        with self.lock:
-            if driver in self.active_drivers:
-                self.active_drivers.remove(driver)
+                # Fechar diálogo se presente
                 try:
-                    driver.get("about:blank")
-                    self.available_drivers.put(driver)
-                except:
-                    self._safely_quit_driver(driver)
-    
-    def _safely_quit_driver(self, driver):
-        try:
-            driver.quit()
-        except:
-            pass
-    
-    def cleanup(self):
-        logger.info("Limpando pool de drivers")
-        while not self.available_drivers.empty():
-            driver = self.available_drivers.get()
-            self._safely_quit_driver(driver)
-        
-        with self.lock:
-            for driver in list(self.active_drivers):
-                self._safely_quit_driver(driver)
-            self.active_drivers.clear()
-
-class UserSimulator:
-    def __init__(self, driver_pool):
-        self.driver_pool = driver_pool
-    
-    def simulate_user_access(self, user_id):
-        driver = None
-        try:
-            logger.info(f"Usuário {user_id}: Iniciando simulação")
-            log_memory_status(user_id, 'Start')
-            
-            driver = self.driver_pool.get_driver()
-            if not driver:
-                logger.error(f"Usuário {user_id}: Não foi possível obter um driver")
-                return
-            
-            driver.set_page_load_timeout(30)
-            url = "https://gli-bcrash.eu-f2.bananaprovider.com/demo"
-            
-            for attempt in range(MAX_RETRIES):
-                try:
-                    driver.get(url)
-                    logger.info(f"Usuário {user_id}: Página carregada com sucesso")
-                    log_memory_status(user_id, 'Page Loaded')
-                    break
-                except Exception as e:
-                    if attempt == MAX_RETRIES - 1:
-                        raise
-                    time.sleep(RETRY_DELAY)
-            
-            start_time = time.time()
-            interaction_count = 0
-            
-            while time.time() - start_time < CONNECTION_TIME:
-                try:
-                    # Fechar diálogo se presente
-                    try:
-                        dialog_backdrop = driver.find_element(By.CSS_SELECTOR, "div.q-dialog__backdrop")
-                        if dialog_backdrop.is_displayed():
-                            dialog_backdrop.click()
-                            time.sleep(1)
-                    except:
-                        pass
-                    
-                    # Interagir com botões
-                    wait = WebDriverWait(driver, 10)
-                    buttons = wait.until(
-                        EC.presence_of_all_elements_located((By.CSS_SELECTOR, "button.btn--bet"))
+                    dialog = WebDriverWait(driver, 3).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, "div.q-dialog__backdrop"))
                     )
-                    
-                    for i in range(min(2, len(buttons))):
-                        button = buttons[i]
-                        driver.execute_script("arguments[0].scrollIntoView(true);", button)
-                        time.sleep(0.5)
-                        driver.execute_script("arguments[0].click();", button)
-                        logger.info(f"Usuário {user_id}: Clicou no botão {i+1}")
-                        interaction_count += 1
-                        time.sleep(1)
-                    
-                    time.sleep(random.uniform(5, 8))
-                    
-                except Exception as e:
-                    logger.warning(f"Usuário {user_id}: Erro durante interação - {str(e)}")
-                    time.sleep(2)
-            
-            logger.info(f"Usuário {user_id}: Simulação concluída com sucesso (Total de interações: {interaction_count})")
-            
-        except Exception as e:
-            logger.error(f"Usuário {user_id}: Erro durante a simulação - {str(e)}")
+                    if dialog.is_displayed():
+                        dialog.click()
+                except:
+                    pass
+                
+                # Encontrar e clicar nos botões
+                buttons = WebDriverWait(driver, 10).until(
+                    EC.presence_of_all_elements_located((By.CSS_SELECTOR, "button.btn--bet"))
+                )
+                
+                for i in range(min(2, len(buttons))):
+                    driver.execute_script("arguments[0].scrollIntoView(true);", buttons[i])
+                    time.sleep(0.5)
+                    driver.execute_script("arguments[0].click();", buttons[i])
+                    logger.info(f"Usuário {user_id}: Clicou no botão {i+1}")
+                    interaction_count += 1
+                    time.sleep(1)
+                
+                time.sleep(random.uniform(5, 8))
+                
+            except Exception as e:
+                logger.warning(f"Usuário {user_id}: Erro durante interação - {str(e)}")
+                if "without establishing a connection" in str(e):
+                    break
+                time.sleep(2)
         
-        finally:
-            if driver:
-                self.driver_pool.return_driver(driver)
-                logger.info(f"Usuário {user_id}: Driver devolvido ao pool")
+        logger.info(f"Usuário {user_id}: Simulação concluída com sucesso (Total de interações: {interaction_count})")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Usuário {user_id}: Erro durante a simulação - {str(e)}")
+        return False
+    
+    finally:
+        if driver:
+            try:
+                driver.quit()
+                logger.info(f"Usuário {user_id}: Driver fechado com sucesso")
+            except:
+                pass
+        browser_manager.end_session()
+        cleanup_firefox()  # Limpa processos ao finalizar
 
-def process_users_in_chunks(total_users, chunk_size, simulator):
-    for i in range(0, total_users, chunk_size):
-        chunk = range(i + 1, min(i + chunk_size + 1, total_users + 1))
-        logger.info(f"Processando chunk de usuários {list(chunk)}")
+def process_user_batch(user_ids, browser_manager):
+    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT) as executor:
+        futures = []
+        for user_id in user_ids:
+            future = executor.submit(simulate_user_access, user_id, browser_manager)
+            futures.append(future)
         
-        with ThreadPoolExecutor(max_workers=chunk_size) as executor:
-            executor.map(simulator.simulate_user_access, chunk)
-        
-        time.sleep(5)  # Intervalo entre chunks
+        # Aguardar conclusão
+        for future in futures:
+            future.result()
 
 def main():
-    total_users = 20  # Total de usuários
-    chunk_size = 10   # Tamanho do chunk (usuários simultâneos)
-    pool_size = chunk_size + 2  # Alguns drivers extras no pool
+    logger.info(f"Iniciando simulação progressiva (máximo {MAX_CONCURRENT} simultâneos)")
+    browser_manager = BrowserManager()
     
-    logger.info(f"Iniciando simulação com {total_users} usuários (chunks de {chunk_size})")
-    log_memory_status('MAIN', 'Start')
+    next_user_id = 1
+    while next_user_id <= TOTAL_USERS:
+        # Criar batch atual
+        batch_size = min(INITIAL_BATCH_SIZE, TOTAL_USERS - next_user_id + 1)
+        current_batch = range(next_user_id, next_user_id + batch_size)
+        
+        logger.info(f"Processando batch de usuários {list(current_batch)}")
+        process_user_batch(current_batch, browser_manager)
+        
+        next_user_id += batch_size
+        
+        # Intervalo entre batches
+        if next_user_id <= TOTAL_USERS:
+            logger.info(f"Aguardando {BATCH_INTERVAL} segundos antes do próximo batch")
+            time.sleep(BATCH_INTERVAL)
     
-    # Criar e inicializar pool
-    driver_pool = DriverPool(pool_size)
-    driver_pool.initialize_pool()
-    
-    # Registrar limpeza ao finalizar
-    atexit.register(driver_pool.cleanup)
-    
-    # Criar simulador
-    simulator = UserSimulator(driver_pool)
-    
-    try:
-        # Processar usuários em chunks
-        process_users_in_chunks(total_users, chunk_size, simulator)
-    finally:
-        # Limpar recursos
-        driver_pool.cleanup()
-    
-    log_memory_status('MAIN', 'End')
     logger.info("Simulação concluída")
 
 if __name__ == "__main__":
