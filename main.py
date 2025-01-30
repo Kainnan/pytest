@@ -134,8 +134,8 @@ def simulate_user_access(user_id):
 
 def main():
     # Começar com números menores para teste
-    num_users = 2  # Reduzido para teste inicial
-    max_workers = 1  # Reduzido para teste inicial
+    num_users = 10  # Reduzido para teste inicial
+    max_workers = 5  # Reduzido para teste inicial
     
     logger.info(f"Iniciando simulação com {num_users} usuários e {max_workers} workers")
     
