@@ -1,6 +1,7 @@
 FROM python:3.12-slim
 
 ENV GECKODRIVER_VERSION=v0.33.0
+ENV DEBIAN_FRONTEND=noninteractive
 
 # Instalar dependências do sistema
 RUN apt-get update && apt-get install -y \
@@ -14,30 +15,29 @@ RUN apt-get update && apt-get install -y \
     libxt6 \
     libpci3 \
     xvfb \
+    procps \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Baixar e instalar geckodriver durante a construção do container
+# Baixar e instalar geckodriver
 RUN wget -q "https://github.com/mozilla/geckodriver/releases/download/${GECKODRIVER_VERSION}/geckodriver-${GECKODRIVER_VERSION}-linux64.tar.gz" \
     && tar -xzf "geckodriver-${GECKODRIVER_VERSION}-linux64.tar.gz" \
     && rm "geckodriver-${GECKODRIVER_VERSION}-linux64.tar.gz" \
-    && chmod +x geckodriver \
-    && mv geckodriver /usr/local/bin/
-
-# Criar diretório para geckodriver
-RUN mkdir -p /opt/geckodriver \
-    && mv /usr/local/bin/geckodriver /opt/geckodriver/ \
+    && mkdir -p /opt/geckodriver \
+    && mv geckodriver /opt/geckodriver/ \
     && chmod 755 /opt/geckodriver/geckodriver \
     && ln -s /opt/geckodriver/geckodriver /usr/local/bin/geckodriver
+
+# Criar diretórios necessários
+RUN mkdir -p /root/.cache/selenium \
+    && chmod -R 777 /root/.cache/selenium \
+    && mkdir -p /dev/shm \
+    && chmod 1777 /dev/shm
 
 # Copiar requirements e instalar dependências Python
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
-# Criar diretório para cache do selenium
-RUN mkdir -p /root/.cache/selenium \
-    && chmod -R 777 /root/.cache/selenium
 
 # Copiar o código da aplicação
 COPY . .
